@@ -1,0 +1,568 @@
+<script>
+// ============================================================
+// js.html — Frontend Logic
+// ============================================================
+
+var currentUser = null;
+
+// ---------- HELPERS ----------
+function $(id) { return document.getElementById(id); }
+function show(id) { $(id).classList.remove('hidden'); }
+function hide(id) { $(id).classList.add('hidden'); }
+function showLoader() { show('loader'); }
+function hideLoader() { hide('loader'); }
+function q(sel) { return document.querySelector(sel); }
+function qa(sel) { return document.querySelectorAll(sel); }
+
+// ---------- LOGIN ----------
+function handleLogin() {
+  var user = $('login-user').value.trim();
+  var pass = $('login-pass').value;
+  var err  = $('login-error');
+  err.innerText = '';
+  if (!user || !pass) { err.innerText = 'Username dan password wajib diisi!'; return; }
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) {
+      hideLoader();
+      if (r.success) {
+        currentUser = r;
+        hide('login-screen');
+        show('app');
+        $('hdr-user').innerText = r.role + ' — ' + r.name;
+        initRole(r.role);
+      } else {
+        err.innerText = r.message;
+      }
+    })
+    .withFailureHandler(function(e) { hideLoader(); err.innerText = 'Koneksi gagal: ' + e.message; })
+    .loginUser(user, pass);
+}
+
+function doLogout() {
+  currentUser = null;
+  hide('app'); show('login-screen');
+  hide('sec-admin'); hide('sec-intern'); hide('sec-mentor');
+  $('login-user').value = '';
+  $('login-pass').value = '';
+  $('login-error').innerText = '';
+}
+
+function initRole(role) {
+  if (role === 'Admin') { show('sec-admin'); loadAdminDashboard(); loadMentorDropdown(); }
+  else if (role === 'Intern') { show('sec-intern'); loadInternAttendance(); loadMyLogbooks(); }
+  else if (role === 'Mentor') { show('sec-mentor'); loadMentorDashboard(); buildFinalEvalForms(); }
+}
+
+// ============================================================
+// ADMIN
+// ============================================================
+function adminTab(tab, el) {
+  qa('#sec-admin .nav-tab').forEach(function(t){ t.classList.remove('active'); });
+  el.classList.add('active');
+  hide('admin-dashboard'); hide('admin-manage');
+  show('admin-' + tab);
+}
+
+function loadAdminDashboard() {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(d) {
+      hideLoader();
+      $('sc-active').innerText   = d.activeInterns;
+      $('sc-pending').innerText  = d.pendingEvals;
+      $('sc-logbook').innerText  = d.approvedLogbooks;
+      $('sc-expiring').innerText = d.expiringInterns;
+
+      var tb = $('tb-interns');
+      tb.innerHTML = '';
+      d.internList.forEach(function(i) {
+        var tr = document.createElement('tr');
+        var badge = i.status === 'Active' ? 'badge-active' : 'badge-inactive';
+        tr.innerHTML =
+          '<td>' + i.name + '</td>' +
+          '<td>' + i.branch + '</td>' +
+          '<td>' + i.department + '</td>' +
+          '<td>' + (i.mentor || '-') + '</td>' +
+          '<td>' + (i.phone || '-') + '</td>' +
+          '<td>' + (i.university || '-') + '</td>' +
+          '<td><span class="badge ' + badge + '">' + i.status + '</span></td>' +
+          '<td><button class="btn btn-outline btn-sm" onclick="toggleStatus(\'' + i.username + '\',\'' + i.status + '\')">' +
+            (i.status === 'Active' ? 'Nonaktifkan' : 'Aktifkan') + '</button></td>';
+        tb.appendChild(tr);
+      });
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .getAdminDashboardData();
+}
+
+function toggleStatus(username, current) {
+  var newSt = (current === 'Active') ? 'Inactive' : 'Active';
+  if (!confirm('Ubah status ' + username + ' menjadi ' + newSt + '?')) return;
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) { hideLoader(); if(r.success) loadAdminDashboard(); else alert(r.message); })
+    .updateInternStatus(username, newSt);
+}
+
+function loadMentorDropdown() {
+  google.script.run
+    .withSuccessHandler(function(list) {
+      var sel = $('ai-mentor');
+      sel.innerHTML = '<option value="">-- Pilih Mentor --</option>';
+      list.forEach(function(m) {
+        var o = document.createElement('option');
+        o.value = m.username;
+        o.text = m.name + ' (' + m.username + ')';
+        sel.appendChild(o);
+      });
+    })
+    .getMentorList();
+}
+
+function doAddIntern() {
+  var d = {
+    name: $('ai-name').value.trim(),
+    username: $('ai-username').value.trim(),
+    password: $('ai-password').value,
+    email: $('ai-email').value.trim(),
+    phone: $('ai-phone').value.trim(),
+    university: $('ai-univ').value.trim(),
+    branch: $('ai-branch').value,
+    department: $('ai-dept').value,
+    mentor_username: $('ai-mentor').value,
+    start_date: $('ai-start').value,
+    end_date: $('ai-end').value
+  };
+  if (!d.name || !d.username || !d.password || !d.branch || !d.department) {
+    alert('Nama, Username, Password, Cabang, dan Departemen wajib diisi!');
+    return;
+  }
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) {
+      hideLoader();
+      alert(r.message);
+      if (r.success) {
+        // Clear form
+        ['ai-name','ai-username','ai-password','ai-email','ai-phone','ai-univ','ai-start','ai-end'].forEach(function(id){ $(id).value=''; });
+        $('ai-branch').value = ''; $('ai-dept').value = ''; $('ai-mentor').value = '';
+        loadAdminDashboard();
+      }
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .addIntern(d);
+}
+
+function downloadRekap() {
+  var month = prompt('Masukkan bulan (1-12):', new Date().getMonth() + 1);
+  var year  = prompt('Masukkan tahun:', new Date().getFullYear());
+  if (!month || !year) return;
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(rows) {
+      hideLoader();
+      // Convert to CSV and download
+      var csv = rows.map(function(r) {
+        return r.map(function(c){ return '"' + String(c).replace(/"/g,'""') + '"'; }).join(',');
+      }).join('\n');
+      var blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'Rekap_Absensi_' + year + '_' + month + '.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .getAttendanceReport(parseInt(month), parseInt(year));
+}
+
+// ============================================================
+// INTERN
+// ============================================================
+function internTab(tab, el) {
+  qa('#sec-intern .nav-tab').forEach(function(t){ t.classList.remove('active'); });
+  el.classList.add('active');
+  hide('intern-att'); hide('intern-feedback');
+  if (tab === 'att') { show('intern-att'); }
+  else { show('intern-feedback'); loadMyEvaluations(); }
+}
+
+function loadInternAttendance() {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(s) {
+      hideLoader();
+      var txt = $('att-status-text');
+      var bIn = $('btn-clockin');
+      var bOut = $('btn-clockout');
+
+      if (s.status === 'idle') {
+        txt.innerText = 'Belum absen hari ini';
+        txt.style.color = 'var(--text-secondary)';
+        bIn.disabled = false; bOut.disabled = true;
+      } else if (s.status === 'checked_in') {
+        txt.innerText = '✅ Sedang bekerja — Login jam ' + s.loginTime;
+        txt.style.color = 'var(--success)';
+        bIn.disabled = true; bOut.disabled = false;
+      } else if (s.status === 'checked_out') {
+        txt.innerText = '🏁 Selesai — Status: ' + s.attStatus;
+        txt.style.color = 'var(--primary)';
+        bIn.disabled = true; bOut.disabled = true;
+      } else if (s.status === 'manual') {
+        txt.innerText = '📋 Absensi manual — ' + s.attStatus;
+        txt.style.color = 'var(--warning)';
+        bIn.disabled = true; bOut.disabled = true;
+      }
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .getInternState(currentUser.username);
+}
+
+function doClockIn() {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) { hideLoader(); alert(r.message); loadInternAttendance(); })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .clockIn(currentUser.username);
+}
+
+function doClockOut() {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) { hideLoader(); alert(r.message); loadInternAttendance(); })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .clockOut(currentUser.username);
+}
+
+function doManualAtt() {
+  var status = $('man-status').value;
+  var reason = $('man-reason').value.trim();
+  if (!reason) { alert('Keterangan/Alasan wajib diisi!'); return; }
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) {
+      hideLoader(); alert(r.message);
+      $('man-reason').value = '';
+      loadInternAttendance();
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .manualAttendance(currentUser.username, status, reason);
+}
+
+function doSubmitLogbook() {
+  var text = $('logbook-text').value.trim();
+  if (!text) { alert('Logbook tidak boleh kosong!'); return; }
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) {
+      hideLoader(); alert(r.message);
+      $('logbook-text').value = '';
+      loadMyLogbooks();
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .submitLogbook(currentUser.username, text);
+}
+
+function loadMyLogbooks() {
+  google.script.run
+    .withSuccessHandler(function(list) {
+      var tb = $('tb-my-logbooks');
+      tb.innerHTML = '';
+      if (list.length === 0) { tb.innerHTML = '<tr><td colspan="3" class="text-muted text-center">Belum ada logbook.</td></tr>'; return; }
+      list.reverse().forEach(function(l) {
+        var badge = l.status === 'Approved' ? 'badge-approved' : 'badge-pending';
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + l.date + '</td><td>' + l.content.replace(/\n/g,'<br>') + '</td><td><span class="badge ' + badge + '">' + l.status + '</span></td>';
+        tb.appendChild(tr);
+      });
+    })
+    .getMyLogbooks(currentUser.username);
+}
+
+function loadMyEvaluations() {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(list) {
+      hideLoader();
+      var el = $('feedback-list');
+      if (list.length === 0) { el.innerHTML = '<p class="text-muted">Belum ada evaluasi dari mentor Anda.</p>'; return; }
+      var html = '';
+      list.forEach(function(ev) {
+        html += '<div class="card" style="border-left:4px solid var(--primary)">';
+        html += '<p><strong>Periode:</strong> ' + ev.monthYear + '</p>';
+        if (ev.conclusion) html += '<p><strong>Kesimpulan:</strong> ' + ev.conclusion + '</p>';
+        try {
+          var data = JSON.parse(ev.evaluationData);
+          if (data.softSkill) {
+            html += '<h4>Soft Skill</h4><table class="eval-table"><thead><tr><th>Aspek</th><th>Nilai</th><th>Catatan</th></tr></thead><tbody>';
+            data.softSkill.forEach(function(s) {
+              html += '<tr><td>' + s.aspect + '</td><td>' + s.score + '</td><td>' + (s.note||'-') + '</td></tr>';
+            });
+            html += '</tbody></table>';
+          }
+          if (data.hardSkill) {
+            html += '<h4>Hard Skill</h4><table class="eval-table"><thead><tr><th>Aspek</th><th>Nilai</th><th>Catatan</th></tr></thead><tbody>';
+            data.hardSkill.forEach(function(s) {
+              html += '<tr><td>' + s.aspect + '</td><td>' + s.score + '</td><td>' + (s.note||'-') + '</td></tr>';
+            });
+            html += '</tbody></table>';
+          }
+          if (data.sectionA) {
+            html += '<h4>Evaluasi Akhir — Bagian A</h4>';
+            for (var key in data.sectionA) {
+              html += '<p><strong>' + key + ':</strong></p><ul>';
+              data.sectionA[key].forEach(function(row) {
+                html += '<li>' + row.aspect + ': <strong>' + row.score + '</strong></li>';
+              });
+              html += '</ul>';
+            }
+          }
+          if (data.sectionB) {
+            html += '<h4>Evaluasi Akhir — Bagian B</h4>';
+            data.sectionB.forEach(function(fn, idx) {
+              html += '<p><strong>Fungsi ' + (idx+1) + ': ' + (fn.fungsi||'-') + '</strong></p><ul>';
+              fn.items.forEach(function(itm) {
+                html += '<li>' + itm.aspect + ': <strong>' + itm.score + '</strong></li>';
+              });
+              html += '</ul>';
+            });
+          }
+        } catch(e) {
+          html += '<p class="text-muted">Data evaluasi: ' + ev.evaluationData + '</p>';
+        }
+        html += '</div>';
+      });
+      el.innerHTML = html;
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .getMyEvaluations(currentUser.username);
+}
+
+// ============================================================
+// MENTOR
+// ============================================================
+var mentorInternsList = [];
+
+function mentorTab(tab, el) {
+  qa('#sec-mentor .nav-tab').forEach(function(t){ t.classList.remove('active'); });
+  el.classList.add('active');
+  hide('mentor-dashboard'); hide('mentor-monthly'); hide('mentor-final');
+  show('mentor-' + tab);
+  if (tab === 'monthly' || tab === 'final') populateInternSelects();
+}
+
+function loadMentorDashboard() {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(list) {
+      hideLoader();
+      mentorInternsList = list;
+      var el = $('mentor-intern-list');
+      if (list.length === 0) { el.innerHTML = '<p class="text-muted">Tidak ada intern yang di-assign ke Anda.</p>'; return; }
+      var html = '<div class="table-wrap"><table><thead><tr><th>Nama</th><th>Departemen</th><th>Aksi</th></tr></thead><tbody>';
+      list.forEach(function(i) {
+        html += '<tr><td>' + i.name + '</td><td>' + i.department + '</td>' +
+          '<td><button class="btn btn-outline btn-sm" onclick="viewInternDetail(\'' + i.username + '\',\'' + i.name + '\')">Lihat Detail</button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+      el.innerHTML = html;
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .getMentorInterns(currentUser.username);
+}
+
+function populateInternSelects() {
+  ['ev-intern', 'fe-intern'].forEach(function(id) {
+    var sel = $(id);
+    var current = sel.value;
+    sel.innerHTML = '<option value="">-- Pilih Intern --</option>';
+    mentorInternsList.forEach(function(i) {
+      var o = document.createElement('option');
+      o.value = i.username; o.text = i.name;
+      sel.appendChild(o);
+    });
+    sel.value = current;
+  });
+}
+
+function viewInternDetail(username, name) {
+  show('mentor-detail');
+  $('md-name').innerText = name;
+  $('md-name2').innerText = name;
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(d) {
+      hideLoader();
+      // Logbooks
+      var tbL = $('md-logbooks');
+      tbL.innerHTML = '';
+      d.logs.forEach(function(l) {
+        var badge = l.status === 'Approved' ? 'badge-approved' : 'badge-pending';
+        var btn = l.status === 'Pending'
+          ? '<button class="btn btn-success btn-sm" onclick="doApproveLogbook(\'' + l.id + '\',\'' + username + '\',\'' + name + '\')">Approve</button>'
+          : '<span class="text-muted">✓</span>';
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + l.date + '</td><td>' + l.content.replace(/\n/g,'<br>') + '</td><td><span class="badge ' + badge + '">' + l.status + '</span></td><td>' + btn + '</td>';
+        tbL.appendChild(tr);
+      });
+      if (d.logs.length === 0) tbL.innerHTML = '<tr><td colspan="4" class="text-muted">Belum ada logbook.</td></tr>';
+
+      // Attendance
+      var tbA = $('md-attendance');
+      tbA.innerHTML = '';
+      d.attendance.forEach(function(a) {
+        var tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + a.date + '</td><td>' + a.login + '</td><td>' + a.logout + '</td><td>' + (a.status||'-') + '</td><td>' + (a.reason||'-') + '</td>';
+        tbA.appendChild(tr);
+      });
+      if (d.attendance.length === 0) tbA.innerHTML = '<tr><td colspan="5" class="text-muted">Belum ada data absensi.</td></tr>';
+    })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .getInternDetail(username);
+}
+
+function doApproveLogbook(logId, username, name) {
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) {
+      hideLoader();
+      if (r.success) { alert('Logbook approved!'); viewInternDetail(username, name); }
+      else alert(r.message);
+    })
+    .approveLogbook(logId);
+}
+
+// ---------- MONTHLY EVAL ----------
+function doSubmitMonthlyEval() {
+  var intern = $('ev-intern').value;
+  var month  = $('ev-month').value;
+  if (!intern || !month) { alert('Pilih intern dan bulan evaluasi!'); return; }
+
+  var softSkill = [];
+  var ssAspects = ['Kedisiplinan','Adaptasi','Inisiatif','Tanggung Jawab'];
+  for (var i = 0; i < 4; i++) {
+    var checked = document.querySelector('input[name="ss'+i+'"]:checked');
+    softSkill.push({
+      aspect: ssAspects[i],
+      score: checked ? parseInt(checked.value) : 0,
+      note: document.querySelectorAll('.ss-note')[i].value
+    });
+  }
+
+  var hardSkill = [];
+  var hsAspects = document.querySelectorAll('.hs-aspect');
+  for (var j = 0; j < 5; j++) {
+    var hChecked = document.querySelector('input[name="hs'+j+'"]:checked');
+    var aspect = hsAspects[j].value.trim();
+    if (aspect) {
+      hardSkill.push({
+        aspect: aspect,
+        score: hChecked ? parseInt(hChecked.value) : 0,
+        note: document.querySelectorAll('.hs-note')[j].value
+      });
+    }
+  }
+
+  var json = JSON.stringify({ softSkill: softSkill, hardSkill: hardSkill });
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) { hideLoader(); alert(r.message); })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .submitEvaluation(intern, currentUser.username, month, json, '');
+}
+
+// ---------- FINAL EVAL ----------
+var SECTION_A = {
+  'Adaptasi': ['Kemampuan menyesuaikan diri','Membina hubungan kerja','Kerja sama tim','Menerima masukan','Fleksibilitas'],
+  'Kedisiplinan': ['Ketepatan waktu','Kepatuhan aturan','Konsistensi kerja'],
+  'Inisiatif': ['Memberikan ide/gagasan','Proaktif menyelesaikan masalah','Belajar mandiri'],
+  'Kerjasama': ['Sinergi dalam tim','Komunikasi efektif'],
+  'Tanggung Jawab': ['Menyelesaikan tugas tepat waktu','Kualitas hasil kerja','Menjaga kerahasiaan']
+};
+
+var SECTION_B_ASPECTS = [
+  'Kemampuan memahami pekerjaan',
+  'Melaksanakan tugas segera',
+  'Kecepatan & kecekatan',
+  'Inisiatif melaksanakan pekerjaan',
+  'Hasil pekerjaan'
+];
+
+function buildFinalEvalForms() {
+  // Section A
+  var htmlA = '';
+  var aIdx = 0;
+  for (var cat in SECTION_A) {
+    htmlA += '<h5 style="margin-top:16px">' + cat + '</h5>';
+    htmlA += '<div class="table-wrap"><table class="eval-table"><thead><tr><th>Aspek</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th></tr></thead><tbody>';
+    SECTION_A[cat].forEach(function(asp) {
+      htmlA += '<tr><td>' + asp + '</td>';
+      for (var s = 1; s <= 5; s++) {
+        htmlA += '<td><input type="radio" name="fa' + aIdx + '" value="' + s + '"></td>';
+      }
+      htmlA += '</tr>';
+      aIdx++;
+    });
+    htmlA += '</tbody></table></div>';
+  }
+  $('fe-section-a').innerHTML = htmlA;
+
+  // Section B — 3 tables
+  var htmlB = '';
+  for (var t = 0; t < 3; t++) {
+    htmlB += '<div style="margin-bottom:16px"><label><strong>Fungsi/Bidang ' + (t+1) + ':</strong></label>';
+    htmlB += '<input type="text" class="form-control fb-fungsi" placeholder="Nama Fungsi/Bidang" style="margin:8px 0">';
+    htmlB += '<div class="table-wrap"><table class="eval-table"><thead><tr><th>Aspek</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th></tr></thead><tbody>';
+    SECTION_B_ASPECTS.forEach(function(asp, idx) {
+      var rName = 'fb' + t + '_' + idx;
+      htmlB += '<tr><td>' + asp + '</td>';
+      for (var s = 1; s <= 5; s++) {
+        htmlB += '<td><input type="radio" name="' + rName + '" value="' + s + '"></td>';
+      }
+      htmlB += '</tr>';
+    });
+    htmlB += '</tbody></table></div></div>';
+  }
+  $('fe-section-b').innerHTML = htmlB;
+}
+
+function doSubmitFinalEval() {
+  var intern = $('fe-intern').value;
+  var conclusion = $('fe-conclusion').value;
+  if (!intern) { alert('Pilih intern terlebih dahulu!'); return; }
+  if (!conclusion) { alert('Pilih kesimpulan Bagian C!'); return; }
+
+  // Collect Section A
+  var sectionA = {};
+  var aIdx = 0;
+  for (var cat in SECTION_A) {
+    sectionA[cat] = [];
+    SECTION_A[cat].forEach(function(asp) {
+      var c = document.querySelector('input[name="fa' + aIdx + '"]:checked');
+      sectionA[cat].push({ aspect: asp, score: c ? parseInt(c.value) : 0 });
+      aIdx++;
+    });
+  }
+
+  // Collect Section B
+  var sectionB = [];
+  var fungsiInputs = document.querySelectorAll('.fb-fungsi');
+  for (var t = 0; t < 3; t++) {
+    var items = [];
+    SECTION_B_ASPECTS.forEach(function(asp, idx) {
+      var c = document.querySelector('input[name="fb' + t + '_' + idx + '"]:checked');
+      items.push({ aspect: asp, score: c ? parseInt(c.value) : 0 });
+    });
+    sectionB.push({ fungsi: fungsiInputs[t].value.trim(), items: items });
+  }
+
+  var json = JSON.stringify({ sectionA: sectionA, sectionB: sectionB });
+  showLoader();
+  google.script.run
+    .withSuccessHandler(function(r) { hideLoader(); alert(r.message); })
+    .withFailureHandler(function(e) { hideLoader(); alert('Error: ' + e.message); })
+    .submitEvaluation(intern, currentUser.username, 'Final', json, conclusion);
+}
+</script>

@@ -1,0 +1,9 @@
+# Google Apps Script (backend runs on GAS, not Vercel)
+Code.gs
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
